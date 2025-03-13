@@ -1,0 +1,9 @@
+[Unit]
+Description=Update service IP ranges weekly
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=3600
+
+[Install]
+WantedBy=timers.target
