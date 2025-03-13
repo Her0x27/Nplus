@@ -1,55 +1,45 @@
 #!/bin/bash
 
-TEMP_DIR="/tmp/service-ips"
-OUTPUT_FILE="/etc/nftables.d/service-ips.conf"
 SERVICES_FILE="/etc/nftables.d/services.json"
+OUTPUT_FILE="/etc/nftables.d/service-ips.conf"
 
-mkdir -p $TEMP_DIR
+# Start generating nftables rules
+cat > $OUTPUT_FILE <<'EOF'
+#!/usr/sbin/nft -f
 
-# Function to fetch and process IP ranges
-fetch_ips() {
-    local service=$1
-    local asn=$2
-    whois -h whois.radb.net -- "-i origin $asn" | grep "^route:" | awk '{print $2}' | sort -u >> "$TEMP_DIR/$service.txt"
-}
-
-# Process services from JSON
-process_services() {
-    local services=$(jq -r '.services | keys[]' $SERVICES_FILE)
-    
-    for service in $services; do
-        echo "Processing $service..."
-        > "$TEMP_DIR/$service.txt"
-        
-        local asns=$(jq -r ".services.$service.asn[]" $SERVICES_FILE)
-        for asn in $asns; do
-            fetch_ips "$service" "$asn"
-        done
-    done
-}
-
-# Generate nftables configuration
-generate_config() {
-    cat > $OUTPUT_FILE <<EOF
-chain services {
+table ip monitor {
+    chain services {
 EOF
+
+# Process each service from JSON
+jq -r '.services | to_entries[] | @json' $SERVICES_FILE | while read -r service; do
+    name=$(echo $service | jq -r '.key')
+    display_name=$(echo $service | jq -r '.value.name')
+    description=$(echo $service | jq -r '.value.description')
     
-    local services=$(jq -r '.services | keys[]' $SERVICES_FILE)
-    for service in $services; do
-        local name=$(jq -r ".services.$service.name" $SERVICES_FILE)
-        local desc=$(jq -r ".services.$service.description" $SERVICES_FILE)
-        
-        echo "    # $desc" >> $OUTPUT_FILE
-        echo "    ip daddr { $(cat $TEMP_DIR/$service.txt | tr '\n' ',' | sed 's/,$//')} counter log prefix \"$name: \"" >> $OUTPUT_FILE
-        echo "" >> $OUTPUT_FILE
-    done
+    echo "        # $description" >> $OUTPUT_FILE
+    echo -n "        ip daddr {" >> $OUTPUT_FILE
     
-    echo "}" >> $OUTPUT_FILE
+    # Get IPs for each ASN
+    echo $service | jq -r '.value.asn[]' | while read -r asn; do
+        whois -h whois.radb.net -- "-i origin $asn" | \
+        grep "^route:" | \
+        awk '{print $2}' | \
+        tr '\n' ','
+    done | sed 's/,$//' >> $OUTPUT_FILE
+    
+    echo "} counter log prefix \"$display_name: \"" >> $OUTPUT_FILE
+    echo "" >> $OUTPUT_FILE
+done
+
+# Close the nftables configuration
+cat >> $OUTPUT_FILE <<'EOF'
+    }
 }
+EOF
 
-# Main execution
-process_services
-generate_config
-nft -f /etc/nftables.conf
+# Make executable and apply
+chmod +x $OUTPUT_FILE
+nft -f $OUTPUT_FILE
 
-echo "Service IP ranges updated successfully"
+echo "Service rules generated successfully"
